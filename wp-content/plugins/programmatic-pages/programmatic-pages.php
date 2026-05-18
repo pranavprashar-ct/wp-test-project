@@ -1,6 +1,6 @@
 <?php
 /*
-Plugin Name: Programmatic Pages
+Plugin Name: CPT Pages
 Description: Manage programmatically created pages via CPT and settings.
 Version: 1.0.0
 Author: CT
@@ -12,6 +12,84 @@ exit;
 
 function ct_is_programmatic_cpt_enabled() {
 return 'yes' === get_option( 'ct_programmatic_cpt_enabled', 'yes' );
+}
+
+function ct_get_programmatic_post_types() {
+$stored = get_option( 'ct_programmatic_post_types', array() );
+$post_types = array();
+
+if ( is_array( $stored ) ) {
+foreach ( $stored as $slug => $label ) {
+$clean_slug = sanitize_key( (string) $slug );
+if ( '' === $clean_slug ) {
+continue;
+}
+
+$clean_label = trim( sanitize_text_field( (string) $label ) );
+if ( '' === $clean_label ) {
+$clean_label = ucwords( str_replace( '_', ' ', $clean_slug ) );
+}
+
+$post_types[ $clean_slug ] = $clean_label;
+}
+}
+
+if ( empty( $post_types ) ) {
+$legacy_slug = sanitize_key( (string) get_option( 'ct_programmatic_post_type', '' ) );
+$legacy_label = trim( (string) get_option( 'ct_programmatic_post_type_label', '' ) );
+if ( '' !== $legacy_slug ) {
+if ( '' === $legacy_label ) {
+$legacy_label = ucwords( str_replace( '_', ' ', $legacy_slug ) );
+}
+$post_types[ $legacy_slug ] = $legacy_label;
+}
+}
+
+return $post_types;
+}
+
+function ct_get_programmatic_post_type() {
+$post_types = ct_get_programmatic_post_types();
+$selected = sanitize_key( (string) get_option( 'ct_programmatic_post_type', '' ) );
+
+if ( '' !== $selected && isset( $post_types[ $selected ] ) ) {
+return $selected;
+}
+
+return (string) key( $post_types );
+}
+
+function ct_get_programmatic_post_type_label() {
+$post_types = ct_get_programmatic_post_types();
+$current = ct_get_programmatic_post_type();
+
+if ( isset( $post_types[ $current ] ) ) {
+return $post_types[ $current ];
+}
+
+return 'CPT Pages';
+}
+
+function ct_generate_programmatic_cpt_slug( $name ) {
+$slug = strtolower( sanitize_text_field( (string) $name ) );
+$slug = preg_replace( '/[^a-z0-9]+/', '_', $slug );
+$slug = trim( (string) $slug, '_' );
+
+// WordPress post type keys are limited to 20 characters.
+if ( strlen( (string) $slug ) > 20 ) {
+$compact_slug = str_replace( '_', '', (string) $slug );
+if ( '' !== $compact_slug ) {
+$slug = $compact_slug;
+}
+}
+
+$slug = substr( (string) $slug, 0, 20 );
+
+if ( '' === $slug ) {
+return 'programmatic_page';
+}
+
+return $slug;
 }
 
 function ct_get_programmatic_fields() {
@@ -309,36 +387,64 @@ if ( ! ct_is_programmatic_cpt_enabled() ) {
 return;
 }
 
+$post_types = ct_get_programmatic_post_types();
+foreach ( $post_types as $post_type => $plural_label ) {
+$singular_label = rtrim( $plural_label, 's' );
+if ( '' === $singular_label ) {
+$singular_label = $plural_label;
+}
+
 $labels = array(
-'name'               => 'Programmatic Pages',
-'singular_name'      => 'Programmatic Page',
+'name'               => $plural_label,
+'singular_name'      => $singular_label,
 'add_new'            => 'Add New',
-'add_new_item'       => 'Add New Programmatic Page',
-'edit_item'          => 'Edit Programmatic Page',
-'new_item'           => 'New Programmatic Page',
-'view_item'          => 'View Programmatic Page',
-'search_items'       => 'Search Programmatic Pages',
-'not_found'          => 'No Programmatic Pages found',
-'not_found_in_trash' => 'No Programmatic Pages found in Trash',
+'add_new_item'       => 'Add New ' . $singular_label,
+'edit_item'          => 'Edit ' . $singular_label,
+'new_item'           => 'New ' . $singular_label,
+'view_item'          => 'View ' . $singular_label,
+'search_items'       => 'Search ' . $plural_label,
+'not_found'          => 'No ' . $plural_label . ' found',
+'not_found_in_trash' => 'No ' . $plural_label . ' found in Trash',
 );
 
 $args = array(
 'labels'       => $labels,
 'public'       => true,
 'has_archive'  => true,
-'show_in_menu' => false,
+'show_in_menu' => true,
 'supports'     => array( 'title', 'editor' ),
 );
 
-register_post_type( 'programmatic_page', $args );
+register_post_type( $post_type, $args );
+}
 }
 add_action( 'init', 'ct_register_programmatic_page_cpt' );
+
+function ct_schedule_programmatic_rewrite_flush() {
+update_option( 'ct_programmatic_flush_rewrite', 'yes' );
+}
+
+function ct_maybe_flush_programmatic_rewrite_rules() {
+if ( 'yes' !== get_option( 'ct_programmatic_flush_rewrite', 'no' ) ) {
+return;
+}
+
+flush_rewrite_rules();
+delete_option( 'ct_programmatic_flush_rewrite' );
+}
+add_action( 'init', 'ct_maybe_flush_programmatic_rewrite_rules', 99 );
 
 function ct_programmatic_pages_activate() {
 if ( false === get_option( 'ct_programmatic_cpt_enabled', false ) ) {
 add_option( 'ct_programmatic_cpt_enabled', 'no' );
 add_option( 'ct_programmatic_setup_needed', 'yes' );
 }
+
+if ( false === get_option( 'ct_programmatic_post_types', false ) ) {
+add_option( 'ct_programmatic_post_types', array() );
+}
+
+add_option( 'ct_programmatic_activation_redirect', 'yes' );
 
 if ( ct_is_programmatic_cpt_enabled() ) {
 ct_register_programmatic_page_cpt();
@@ -348,50 +454,85 @@ flush_rewrite_rules();
 }
 register_activation_hook( __FILE__, 'ct_programmatic_pages_activate' );
 
+function ct_programmatic_maybe_redirect_to_settings() {
+if ( ! current_user_can( 'manage_options' ) ) {
+return;
+}
+
+if ( 'yes' !== get_option( 'ct_programmatic_activation_redirect', 'no' ) ) {
+return;
+}
+
+if ( wp_doing_ajax() ) {
+return;
+}
+
+delete_option( 'ct_programmatic_activation_redirect' );
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings' ) );
+exit;
+}
+add_action( 'admin_init', 'ct_programmatic_maybe_redirect_to_settings' );
+
+function ct_programmatic_plugin_action_links( $links ) {
+$settings_link = '<a href="' . esc_url( admin_url( 'admin.php?page=ct_programmatic_settings' ) ) . '">Settings</a>';
+array_unshift( $links, $settings_link );
+return $links;
+}
+add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), 'ct_programmatic_plugin_action_links' );
+
 function ct_programmatic_pages_deactivate() {
+// Remove all generated Programmatic Page entries when plugin is deactivated.
+$post_types = ct_get_programmatic_post_types();
+foreach ( array_keys( $post_types ) as $post_type ) {
+$programmatic_posts = get_posts(
+array(
+'post_type' => $post_type,
+'post_status' => 'any',
+'numberposts' => -1,
+'fields' => 'ids',
+)
+);
+
+foreach ( $programmatic_posts as $programmatic_post_id ) {
+wp_delete_post( (int) $programmatic_post_id, true );
+}
+}
+
+delete_option( 'ct_programmatic_cpt_enabled' );
+delete_option( 'ct_programmatic_setup_needed' );
+delete_option( 'ct_programmatic_activation_redirect' );
+delete_option( 'ct_programmatic_post_type' );
+delete_option( 'ct_programmatic_post_type_label' );
+delete_option( 'ct_programmatic_post_types' );
+
 flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'ct_programmatic_pages_deactivate' );
 
 function ct_add_admin_menu() {
 add_menu_page(
-'Programmatic Pages',
-'Programmatic Pages',
+'CPT Pages',
+'CPT Pages',
 'manage_options',
-'ct_programmatic_pages',
+'ct_programmatic_settings',
 'ct_settings_page_html',
-'dashicons-admin-page',
-25
+'dashicons-admin-generic',
+59
 );
 
-if ( ! ct_is_programmatic_cpt_enabled() ) {
+if ( ct_is_programmatic_cpt_enabled() ) {
+$post_types = ct_get_programmatic_post_types();
+foreach ( $post_types as $post_type => $label ) {
 add_submenu_page(
-'ct_programmatic_pages',
-'Setup',
-'Setup',
-'manage_options',
-'ct_programmatic_pages',
-'ct_settings_page_html'
-);
-return;
-}
-
-add_submenu_page(
-'ct_programmatic_pages',
-'All Programmatic Pages',
-'All Programmatic Pages',
-'edit_posts',
-'edit.php?post_type=programmatic_page'
-);
-
-add_submenu_page(
-'ct_programmatic_pages',
+'edit.php?post_type=' . $post_type,
 'Import CSV',
 'Import CSV',
 'manage_options',
-'ct_programmatic_import',
+'ct_programmatic_import_' . $post_type,
 'ct_render_programmatic_import_page'
 );
+}
+}
 }
 add_action( 'admin_menu', 'ct_add_admin_menu' );
 
@@ -400,24 +541,102 @@ if ( ! current_user_can( 'manage_options' ) ) {
 return;
 }
 
-$setup_url = wp_nonce_url(
-admin_url( 'admin-post.php?action=ct_programmatic_setup_cpt&choice=create' ),
-'ct_programmatic_setup_cpt'
-);
-
 $enabled = ct_is_programmatic_cpt_enabled();
+$post_type = ct_get_programmatic_post_type();
+$cpt_label = ct_get_programmatic_post_type_label();
+$post_types = ct_get_programmatic_post_types();
+$deleted_cpt = isset( $_GET['deleted_cpt'] ) ? sanitize_key( wp_unslash( $_GET['deleted_cpt'] ) ) : '';
 ?>
 <div class="wrap">
-<h1>Programmatic Pages Settings</h1>
+<h1>CPT Pages Settings</h1>
+<?php if ( '' !== $deleted_cpt ) : ?>
+<div class="notice notice-success is-dismissible"><p><?php echo esc_html( 'Deleted CPT: ' . $deleted_cpt ); ?></p></div>
+<?php endif; ?>
+<?php
+$updated_cpt = isset( $_GET['updated_cpt'] ) ? sanitize_key( wp_unslash( $_GET['updated_cpt'] ) ) : '';
+$edit_cpt = isset( $_GET['edit_cpt'] ) ? sanitize_key( wp_unslash( $_GET['edit_cpt'] ) ) : '';
+?>
+<?php if ( '' !== $updated_cpt ) : ?>
+<div class="notice notice-success is-dismissible"><p><?php echo esc_html( 'Updated CPT: ' . $updated_cpt ); ?></p></div>
+<?php endif; ?>
 <div class="notice notice-info" style="padding:12px 14px; margin: 14px 0 18px;">
-<p><strong>Programmatic Pages Setup</strong></p>
-<p>Create the Programmatic Pages CPT now to start generating pages with the default layout.</p>
-<p><a class="button button-primary" href="<?php echo esc_url( $setup_url ); ?>">Create CPT</a></p>
+<p><strong>CPT Pages Setup</strong></p>
+<p>Create a custom CPT now to start generating pages with the default layout.</p>
+<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:10px;">
+<?php wp_nonce_field( 'ct_programmatic_setup_cpt' ); ?>
+<input type="hidden" name="action" value="ct_programmatic_setup_cpt" />
+<input type="hidden" name="choice" value="create" />
+<label for="ct-programmatic-cpt-name"><strong>CPT Name</strong></label>
+<input id="ct-programmatic-cpt-name" name="cpt_name" type="text" class="regular-text" value="" maxlength="40" placeholder="CPT Pages" required />
+<p class="description">Enter a CPT name. A valid CPT slug will be generated automatically.</p>
+<p><button type="submit" class="button button-primary">Create CPT</button></p>
+</form>
 </div>
 <?php if ( $enabled ) : ?>
-<p>CPT status: enabled. Custom fields are managed on each Programmatic Page edit screen.</p>
-<?php else : ?>
-<p>CPT status: disabled.</p>
+<?php if ( ! empty( $post_types ) ) : ?>
+<h2>Created CPTs</h2>
+<table class="wp-list-table widefat fixed striped table-view-list pages" style="max-width:1100px;">
+<thead>
+<tr>
+<td id="cb" class="manage-column column-cb check-column"><input type="checkbox" disabled /></td>
+<th scope="col" class="manage-column column-title column-primary">CPT Name</th>
+<th scope="col" class="manage-column">CPT Slug</th>
+<th scope="col" class="manage-column">Posts</th>
+</tr>
+</thead>
+<tbody id="the-list">
+<?php foreach ( $post_types as $slug => $label ) : ?>
+<?php
+$delete_url = wp_nonce_url(
+admin_url( 'admin-post.php?action=ct_programmatic_delete_cpt&cpt=' . $slug ),
+'ct_programmatic_delete_cpt_' . $slug
+);
+$edit_url = admin_url( 'admin.php?page=ct_programmatic_settings&edit_cpt=' . $slug );
+$list_url = admin_url( 'edit.php?post_type=' . $slug );
+$import_url = admin_url( 'admin.php?page=ct_programmatic_import_' . $slug );
+$count_object = wp_count_posts( $slug );
+$total_posts = 0;
+foreach ( (array) $count_object as $status_count ) {
+$total_posts += (int) $status_count;
+}
+?>
+<tr>
+<th scope="row" class="check-column"><input type="checkbox" disabled /></th>
+<td class="title column-title has-row-actions column-primary page-title">
+<strong><a href="<?php echo esc_url( $list_url ); ?>" class="row-title"><?php echo esc_html( $label ); ?></a></strong>
+<div class="row-actions">
+<span class="edit"><a href="<?php echo esc_url( $list_url ); ?>">All</a> | </span>
+<span class="view"><a href="<?php echo esc_url( $import_url ); ?>">Import CSV</a> | </span>
+<span class="edit"><a href="<?php echo esc_url( $edit_url ); ?>">Edit CPT</a> | </span>
+<span class="trash"><a href="<?php echo esc_url( $delete_url ); ?>" class="submitdelete" onclick="return confirm('Delete CPT <?php echo esc_js( $slug ); ?> and all its posts?');">Delete</a></span>
+</div>
+<button type="button" class="toggle-row"><span class="screen-reader-text">Show more details</span></button>
+</td>
+<td><code><?php echo esc_html( $slug ); ?></code></td>
+<td><?php echo esc_html( (string) $total_posts ); ?></td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+
+<?php if ( '' !== $edit_cpt && isset( $post_types[ $edit_cpt ] ) ) : ?>
+<h2 style="margin-top:20px;">Edit CPT</h2>
+<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:700px;">
+<?php wp_nonce_field( 'ct_programmatic_edit_cpt_' . $edit_cpt ); ?>
+<input type="hidden" name="action" value="ct_programmatic_edit_cpt" />
+<input type="hidden" name="cpt" value="<?php echo esc_attr( $edit_cpt ); ?>" />
+<table class="form-table" role="presentation">
+<tbody>
+<tr>
+<th scope="row"><label for="ct-edit-cpt-name">CPT Name</label></th>
+<td><input id="ct-edit-cpt-name" name="cpt_name" type="text" class="regular-text" value="<?php echo esc_attr( $post_types[ $edit_cpt ] ); ?>" maxlength="40" required /></td>
+</tr>
+</tbody>
+</table>
+<?php submit_button( 'Update CPT' ); ?>
+</form>
+<?php endif; ?>
+<?php endif; ?>
 <?php endif; ?>
 </div>
 <?php
@@ -428,20 +647,21 @@ if ( ! current_user_can( 'manage_options' ) ) {
 return;
 }
 
+if ( isset( $_GET['page'] ) && 'ct_programmatic_settings' === sanitize_key( wp_unslash( $_GET['page'] ) ) ) {
+return;
+}
+
 if ( 'yes' !== get_option( 'ct_programmatic_setup_needed', 'no' ) ) {
 return;
 }
 
-$create_url = wp_nonce_url(
-admin_url( 'admin-post.php?action=ct_programmatic_setup_cpt&choice=create' ),
-'ct_programmatic_setup_cpt'
-);
+$create_url = admin_url( 'admin.php?page=ct_programmatic_settings' );
 $skip_url = wp_nonce_url(
 admin_url( 'admin-post.php?action=ct_programmatic_setup_cpt&choice=skip' ),
 'ct_programmatic_setup_cpt'
 );
 
-echo '<div class="notice notice-info"><p><strong>Programmatic Pages Setup</strong></p><p>Create the Programmatic Pages CPT now to start generating pages with the default layout.</p><p><a class="button button-primary" href="' . esc_url( $create_url ) . '">Create CPT</a> <a class="button" href="' . esc_url( $skip_url ) . '">Not now</a></p></div>';
+echo '<div class="notice notice-info"><p><strong>CPT Pages Setup</strong></p><p>Open CPT Pages settings to enter your CPT name and create it.</p><p><a class="button button-primary" href="' . esc_url( $create_url ) . '">Open Settings</a> <a class="button" href="' . esc_url( $skip_url ) . '">Not now</a></p></div>';
 }
 add_action( 'admin_notices', 'ct_programmatic_setup_admin_notice' );
 
@@ -452,20 +672,35 @@ wp_die( 'Unauthorized request.' );
 
 check_admin_referer( 'ct_programmatic_setup_cpt' );
 
-$choice = isset( $_GET['choice'] ) ? sanitize_text_field( wp_unslash( $_GET['choice'] ) ) : '';
+$choice = '';
+if ( isset( $_REQUEST['choice'] ) ) {
+$choice = sanitize_text_field( wp_unslash( $_REQUEST['choice'] ) );
+}
 
 if ( 'create' === $choice ) {
+$requested_name = isset( $_REQUEST['cpt_name'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['cpt_name'] ) ) : '';
+if ( '' === $requested_name ) {
+$requested_name = 'CPT Pages';
+}
+
+$requested_post_type = ct_generate_programmatic_cpt_slug( $requested_name );
+
+$post_types = ct_get_programmatic_post_types();
+$post_types[ $requested_post_type ] = $requested_name;
+update_option( 'ct_programmatic_post_types', $post_types );
+update_option( 'ct_programmatic_post_type', $requested_post_type );
+update_option( 'ct_programmatic_post_type_label', $requested_name );
 update_option( 'ct_programmatic_cpt_enabled', 'yes' );
 update_option( 'ct_programmatic_setup_needed', 'no' );
 ct_register_programmatic_page_cpt();
-flush_rewrite_rules();
-wp_safe_redirect( admin_url( 'edit.php?post_type=programmatic_page' ) );
+ct_schedule_programmatic_rewrite_flush();
+wp_safe_redirect( admin_url( 'edit.php?post_type=' . ct_get_programmatic_post_type() ) );
 exit;
 }
 
 if ( 'skip' === $choice ) {
 update_option( 'ct_programmatic_setup_needed', 'no' );
-wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_pages' ) );
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings' ) );
 exit;
 }
 
@@ -474,15 +709,132 @@ exit;
 }
 add_action( 'admin_post_ct_programmatic_setup_cpt', 'ct_programmatic_handle_setup_cpt' );
 
+function ct_programmatic_delete_cpt() {
+if ( ! current_user_can( 'manage_options' ) ) {
+wp_die( 'Unauthorized request.' );
+}
+
+$cpt = isset( $_GET['cpt'] ) ? sanitize_key( wp_unslash( $_GET['cpt'] ) ) : '';
+if ( '' === $cpt ) {
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings' ) );
+exit;
+}
+
+check_admin_referer( 'ct_programmatic_delete_cpt_' . $cpt );
+
+$post_types = ct_get_programmatic_post_types();
+if ( isset( $post_types[ $cpt ] ) ) {
+$posts = get_posts(
+array(
+'post_type' => $cpt,
+'post_status' => 'any',
+'numberposts' => -1,
+'fields' => 'ids',
+)
+);
+
+foreach ( $posts as $post_id ) {
+wp_delete_post( (int) $post_id, true );
+}
+
+unset( $post_types[ $cpt ] );
+}
+
+if ( empty( $post_types ) ) {
+update_option( 'ct_programmatic_post_types', array() );
+update_option( 'ct_programmatic_cpt_enabled', 'no' );
+update_option( 'ct_programmatic_setup_needed', 'yes' );
+update_option( 'ct_programmatic_post_type', '' );
+update_option( 'ct_programmatic_post_type_label', '' );
+} else {
+update_option( 'ct_programmatic_post_types', $post_types );
+$next_slug = (string) key( $post_types );
+update_option( 'ct_programmatic_post_type', $next_slug );
+update_option( 'ct_programmatic_post_type_label', (string) $post_types[ $next_slug ] );
+update_option( 'ct_programmatic_cpt_enabled', 'yes' );
+}
+
+ct_schedule_programmatic_rewrite_flush();
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings&deleted_cpt=' . $cpt ) );
+exit;
+}
+add_action( 'admin_post_ct_programmatic_delete_cpt', 'ct_programmatic_delete_cpt' );
+
+function ct_programmatic_edit_cpt() {
+if ( ! current_user_can( 'manage_options' ) ) {
+wp_die( 'Unauthorized request.' );
+}
+
+$cpt = isset( $_POST['cpt'] ) ? sanitize_key( wp_unslash( $_POST['cpt'] ) ) : '';
+if ( '' === $cpt ) {
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings' ) );
+exit;
+}
+
+check_admin_referer( 'ct_programmatic_edit_cpt_' . $cpt );
+
+$new_name = isset( $_POST['cpt_name'] ) ? sanitize_text_field( wp_unslash( $_POST['cpt_name'] ) ) : '';
+if ( '' === $new_name ) {
+$new_name = ucwords( str_replace( '_', ' ', $cpt ) );
+}
+
+$post_types = ct_get_programmatic_post_types();
+if ( isset( $post_types[ $cpt ] ) ) {
+$new_slug = ct_generate_programmatic_cpt_slug( $new_name );
+
+if ( $new_slug !== $cpt && isset( $post_types[ $new_slug ] ) ) {
+$new_slug = $cpt;
+}
+
+if ( $new_slug !== $cpt ) {
+global $wpdb;
+$wpdb->update(
+$wpdb->posts,
+array( 'post_type' => $new_slug ),
+array( 'post_type' => $cpt ),
+array( '%s' ),
+array( '%s' )
+);
+
+unset( $post_types[ $cpt ] );
+$post_types[ $new_slug ] = $new_name;
+update_option( 'ct_programmatic_post_types', $post_types );
+
+if ( ct_get_programmatic_post_type() === $cpt ) {
+update_option( 'ct_programmatic_post_type', $new_slug );
+update_option( 'ct_programmatic_post_type_label', $new_name );
+}
+
+ct_schedule_programmatic_rewrite_flush();
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings&updated_cpt=' . $new_slug ) );
+exit;
+}
+
+$post_types[ $cpt ] = $new_name;
+update_option( 'ct_programmatic_post_types', $post_types );
+
+if ( ct_get_programmatic_post_type() === $cpt ) {
+update_option( 'ct_programmatic_post_type_label', $new_name );
+}
+}
+
+wp_safe_redirect( admin_url( 'admin.php?page=ct_programmatic_settings&updated_cpt=' . $cpt ) );
+exit;
+}
+add_action( 'admin_post_ct_programmatic_edit_cpt', 'ct_programmatic_edit_cpt' );
+
 function ct_add_programmatic_page_meta_boxes() {
+$post_types = ct_get_programmatic_post_types();
+foreach ( $post_types as $post_type => $label ) {
 add_meta_box(
 'ct_programmatic_page_fields',
-'Programmatic Page Fields',
+'Custom Fields',
 'ct_render_programmatic_page_fields',
-'programmatic_page',
+$post_type,
 'normal',
 'default'
 );
+}
 }
 add_action( 'add_meta_boxes', 'ct_add_programmatic_page_meta_boxes' );
 
@@ -683,7 +1035,19 @@ update_post_meta( $post_id, $field['key'], $sanitized );
 
 ct_sync_yoast_meta_from_programmatic( $post_id );
 }
-add_action( 'save_post_programmatic_page', 'ct_save_programmatic_page_fields' );
+function ct_save_programmatic_page_fields_on_save_post( $post_id, $post ) {
+if ( ! $post ) {
+return;
+}
+
+$post_types = ct_get_programmatic_post_types();
+if ( ! isset( $post_types[ $post->post_type ] ) ) {
+return;
+}
+
+ct_save_programmatic_page_fields( $post_id );
+}
+add_action( 'save_post', 'ct_save_programmatic_page_fields_on_save_post', 10, 2 );
 
 function ct_normalize_csv_header( $value ) {
 $value = preg_replace( '/^\xEF\xBB\xBF/', '', (string) $value );
@@ -743,7 +1107,17 @@ return $matches[0];
 }
 
 function ct_get_programmatic_import_url( $args = array() ) {
-$base_url = admin_url( 'admin.php?page=ct_programmatic_import' );
+$post_type = ct_get_programmatic_post_type();
+if ( isset( $args['ct_post_type'] ) ) {
+$candidate = sanitize_key( (string) $args['ct_post_type'] );
+$post_types = ct_get_programmatic_post_types();
+if ( isset( $post_types[ $candidate ] ) ) {
+$post_type = $candidate;
+}
+unset( $args['ct_post_type'] );
+}
+
+$base_url = admin_url( 'edit.php?post_type=' . $post_type . '&page=ct_programmatic_import_' . $post_type );
 if ( empty( $args ) ) {
 return $base_url;
 }
@@ -754,6 +1128,15 @@ return add_query_arg( $args, $base_url );
 function ct_render_programmatic_import_page() {
 if ( ! current_user_can( 'manage_options' ) ) {
 return;
+}
+
+$post_types = ct_get_programmatic_post_types();
+$active_post_type = ct_get_programmatic_post_type();
+if ( isset( $_GET['post_type'] ) ) {
+$candidate = sanitize_key( wp_unslash( $_GET['post_type'] ) );
+if ( isset( $post_types[ $candidate ] ) ) {
+$active_post_type = $candidate;
+}
 }
 
 $status = isset( $_GET['ct_import_status'] ) ? sanitize_text_field( wp_unslash( $_GET['ct_import_status'] ) ) : '';
@@ -776,6 +1159,7 @@ $errors = isset( $_GET['errors'] ) ? absint( $_GET['errors'] ) : 0;
 <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data">
 <?php wp_nonce_field( 'ct_import_programmatic_csv', 'ct_import_programmatic_csv_nonce' ); ?>
 <input type="hidden" name="action" value="ct_import_programmatic_csv" />
+<input type="hidden" name="ct_post_type" value="<?php echo esc_attr( $active_post_type ); ?>" />
 <input type="file" name="ct_csv_file" accept=".csv,text/csv" required />
 <?php submit_button( 'Import CSV' ); ?>
 </form>
@@ -786,7 +1170,7 @@ $errors = isset( $_GET['errors'] ) ? absint( $_GET['errors'] ) : 0;
 function ct_find_programmatic_post_by_slug( $slug ) {
 $existing = get_posts(
 array(
-'post_type' => 'programmatic_page',
+'post_type' => ct_get_programmatic_post_type(),
 'post_status' => 'any',
 'numberposts' => 1,
 'fields' => 'ids',
@@ -811,7 +1195,7 @@ return (int) $existing[0];
 $by_name = get_posts(
 array(
 'name' => $slug,
-'post_type' => 'programmatic_page',
+'post_type' => ct_get_programmatic_post_type(),
 'post_status' => 'any',
 'numberposts' => 1,
 'fields' => 'ids',
@@ -830,10 +1214,20 @@ if ( ! current_user_can( 'manage_options' ) ) {
 wp_die( 'Unauthorized request.' );
 }
 
+$post_types = ct_get_programmatic_post_types();
+$active_post_type = ct_get_programmatic_post_type();
+if ( isset( $_POST['ct_post_type'] ) ) {
+$candidate = sanitize_key( wp_unslash( $_POST['ct_post_type'] ) );
+if ( isset( $post_types[ $candidate ] ) ) {
+$active_post_type = $candidate;
+}
+}
+
 $uploaded_file = '';
 
 if ( ! isset( $_POST['ct_import_programmatic_csv_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['ct_import_programmatic_csv_nonce'] ) ), 'ct_import_programmatic_csv' ) ) {
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'Invalid import nonce.',
 ) ) );
@@ -842,6 +1236,7 @@ exit;
 
 if ( empty( $_FILES['ct_csv_file']['tmp_name'] ) || ! empty( $_FILES['ct_csv_file']['error'] ) ) {
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'Please choose a valid CSV file.',
 ) ) );
@@ -862,6 +1257,7 @@ array(
 
 if ( isset( $upload['error'] ) ) {
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => $upload['error'],
 ) ) );
@@ -876,6 +1272,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'Unable to open uploaded CSV.',
 ) ) );
@@ -889,6 +1286,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'CSV appears empty or invalid.',
 ) ) );
@@ -904,6 +1302,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'CSV appears empty or invalid.',
 ) ) );
@@ -925,6 +1324,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => sprintf( 'CSV contains duplicate headers: %s. Please keep only one column for each header.', implode( ', ', $duplicate_headers ) ),
 ) ) );
@@ -949,6 +1349,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'error',
 'ct_import_message' => 'CSV must include City and Page URL Slug (or URL Slug) columns.',
 ) ) );
@@ -1011,7 +1412,7 @@ $existing_id = ct_find_programmatic_post_by_slug( $slug );
 $post_args = array(
 'post_title' => $title,
 'post_name' => $slug,
-'post_type' => 'programmatic_page',
+'post_type' => $active_post_type,
 'post_status' => 'publish',
 );
 
@@ -1054,6 +1455,7 @@ if ( ! empty( $uploaded_file ) && file_exists( $uploaded_file ) ) {
 wp_delete_file( $uploaded_file );
 }
 wp_safe_redirect( ct_get_programmatic_import_url( array(
+'ct_post_type' => $active_post_type,
 'ct_import_status' => 'success',
 'created' => $created,
 'updated' => $updated,
@@ -1166,7 +1568,12 @@ return implode( "\n", $sections );
 }
 
 function ct_programmatic_page_content_fallback( $content ) {
-if ( ! is_singular( 'programmatic_page' ) || ! in_the_loop() || ! is_main_query() ) {
+if ( ! in_the_loop() || ! is_main_query() ) {
+return $content;
+}
+
+$post_types = array_keys( ct_get_programmatic_post_types() );
+if ( empty( $post_types ) || ! is_singular( $post_types ) ) {
 return $content;
 }
 
@@ -1190,7 +1597,8 @@ return $generated_content;
 add_filter( 'the_content', 'ct_programmatic_page_content_fallback' );
 
 function ct_programmatic_page_template_include( $template ) {
-if ( ! is_singular( 'programmatic_page' ) ) {
+$post_types = array_keys( ct_get_programmatic_post_types() );
+if ( empty( $post_types ) || ! is_singular( $post_types ) ) {
 return $template;
 }
 
